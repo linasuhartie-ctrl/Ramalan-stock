@@ -1,0 +1,5 @@
+Flask>=3.0,<4
+requests>=2.31,<3
+numpy>=1.26
+pandas>=2.1
+python-dotenv>=1.0

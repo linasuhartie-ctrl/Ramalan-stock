@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>GPR Stock Scanner</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand-mark">G</div>
+  <div class="brand"><strong>GPR SCANNER</strong><span>IDX · QUANT LAB</span></div>
+  <div id="apiBadge" class="badge">Memeriksa API…</div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="eyebrow">GAUSSIAN PROCESS REGRESSION</div>
+    <h1>Temukan peluang.<br><span>Uji dengan data.</span></h1>
+    <p>Scanner multi-timeframe untuk saham BEI, dengan mesin proyeksi GPR berbasis algoritma Pine Script kamu.</p>
+  </section>
+
+  <section class="panel controls">
+    <div class="section-head"><div><span class="eyebrow">01 / SCAN SETTINGS</span><h2>Pengaturan pemindaian</h2></div></div>
+    <label>Timeframe data
+      <select id="timeframe">
+        <option value="5m">5 menit · timing entry</option>
+        <option value="15m">15 menit · konfirmasi</option>
+        <option value="1h">1 jam · tren utama</option>
+        <option value="1d" selected>Harian · uji awal Arjum</option>
+      </select>
+    </label>
+    <div class="two">
+      <label>Horizon candle
+        <select id="horizon">
+          <option value="3">3 candle</option><option value="5">5 candle</option>
+          <option value="10" selected>10 candle</option><option value="20">20 candle</option>
+        </select>
+      </label>
+      <label>Jumlah saham
+        <select id="limit">
+          <option value="20">20 saham</option><option value="50" selected>50 saham</option>
+          <option value="100">100 saham</option><option value="200">200 saham</option>
+        </select>
+      </label>
+    </div>
+    <button id="scanBtn" class="primary">▶ Jalankan GPR Scanner</button>
+    <div id="providerNote" class="notice">Memeriksa status koneksi…</div>
+  </section>
+
+  <section class="stats-grid">
+    <div class="stat"><span>Saham diproses</span><strong id="scanned">—</strong><small id="universe">Menunggu scan</small></div>
+    <div class="stat"><span>Kandidat</span><strong id="candidates">—</strong><small>Tren + momentum + GPR</small></div>
+    <div class="stat"><span>Return GPR tertinggi</span><strong id="bestReturn">—</strong><small>Horizon terpilih</small></div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <div><span class="eyebrow">02 / OPPORTUNITIES</span><h2>Ranking saham</h2></div>
+      <button class="ghost" id="refreshBtn" aria-label="Refresh">↻</button>
+    </div>
+    <input id="search" class="search" placeholder="Cari kode saham…" autocomplete="off">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th># / Kode</th><th>GPR Return</th><th>Tren</th><th>Rel. Vol</th><th>Skor</th></tr></thead>
+        <tbody id="results"><tr><td colspan="5" class="empty">Tekan “Jalankan GPR Scanner” untuk mulai.</td></tr></tbody>
+      </table>
+    </div>
+    <div id="errors" class="notice hidden"></div>
+  </section>
+
+  <section class="panel" id="analysisPanel">
+    <div class="section-head"><div><span class="eyebrow">03 / MODEL DETAIL</span><h2 id="analysisTitle">Analisis saham</h2></div></div>
+    <p class="muted">Ketuk salah satu saham pada ranking untuk melihat lintasan proyeksi GPR.</p>
+    <div class="chart-wrap"><canvas id="projectionChart"></canvas></div>
+    <div id="analysisMeta" class="analysis-meta">Belum ada saham dipilih.</div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Candle ke-</th><th>Harga proyeksi</th><th>Return</th><th>Batas atas</th><th>Batas bawah</th></tr></thead>
+      <tbody id="projectionRows"><tr><td colspan="5" class="empty">Pilih saham untuk melihat proyeksi.</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section class="disclaimer">Catatan: skor adalah ranking heuristik, bukan probabilitas keuntungan atau rekomendasi investasi. Pastikan data dan timeframe dari penyedia benar sebelum dipakai untuk keputusan transaksi.</section>
+</main>
+
+<nav class="bottom-nav">
+  <a class="active" href="#top">▦<span>Scanner</span></a>
+  <a href="#analysisPanel">⌁<span>Analisis</span></a>
+  <a href="#providerNote">ⓘ<span>Status data</span></a>
+</nav>
+<script src="/static/app.js"></script>
+</body>
+</html>
