@@ -390,10 +390,15 @@ def scan():
                 continue
             result = gpr_project(hist,horizon=horizon)
             result["code"] = code
-            result["score"] = round(max(0,min(100,
-                35*(result["trend"]=="BULLISH")+20*(result["momentum"]=="POSITIVE")
-                +20*min(result["relative_volume"]/2,1)
-                +25*max(0,min(result["gpr_return_pct"]/5,1))),1)
+            result["score"] = round(
+                max(0, min(100,
+                    35 * (1 if result["trend"] == "BULLISH" else 0)
+                    + 20 * (1 if result["momentum"] == "POSITIVE" else 0)
+                    + 20 * min(result["relative_volume"] / 2, 1.0)
+                    + 25 * max(0, min(result["gpr_return_pct"] / 5, 1.0))
+                )),
+                1
+            )
             result["signal"] = ("KANDIDAT" if result["trend"]=="BULLISH" and
                 result["momentum"]=="POSITIVE" and result["gpr_return_pct"]>0
                 else "PANTAU" if result["gpr_return_pct"]>0 else "HINDARI")
