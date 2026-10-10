@@ -1,58 +1,110 @@
+'use strict';
+
+/* =========================================================
+   GPR STOCK SCANNER
+   Batch scanning: maksimum 50 saham per permintaan backend
+   ========================================================= */
+
 let scanItems = [];
 let chart = null;
 let lastScan = null;
 let selectedCode = null;
 
+let scanRunning = false;
+let stopRequested = false;
+
+const BATCH_SIZE = 50;
 const $ = (id) => document.getElementById(id);
 
 
-/* =====================================================
+/* =========================================================
    UTILITAS
-   ===================================================== */
+   ========================================================= */
 
-function money(n) {
-  const value = Number(n);
+function setText(id, value) {
+  const element = $(id);
+  if (element) element.textContent = value;
+}
 
-  if (!Number.isFinite(value)) return '—';
+function setHTML(id, value) {
+  const element = $(id);
+  if (element) element.innerHTML = value;
+}
 
-  return value.toLocaleString('id-ID', {
+function showElement(id) {
+  const element = $(id);
+  if (element) element.classList.remove('hidden');
+}
+
+function hideElement(id) {
+  const element = $(id);
+  if (element) element.classList.add('hidden');
+}
+
+function money(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) return '—';
+
+  return number.toLocaleString('id-ID', {
     maximumFractionDigits: 2
   });
 }
 
+function pct(value) {
+  const number = Number(value);
 
-function pct(n) {
-  const value = Number(n);
+  if (!Number.isFinite(number)) return '—';
 
-  if (!Number.isFinite(value)) return '—';
-
-  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
+  return `${number > 0 ? '+' : ''}${number.toFixed(2)}%`;
 }
 
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',
     '"': '&quot;',
     "'": '&#39;'
-  })[c]);
+  })[character]);
 }
 
+function numberValue(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
 
-function setText(id, value) {
-  const el = $(id);
+async function fetchJSON(url) {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    headers: {
+      'Accept': 'application/json'
+    }
+  });
 
-  if (el) {
-    el.textContent = value;
+  let data;
+
+  try {
+    data = await response.json();
+  } catch (_) {
+    throw new Error(
+      `Server mengirim respons yang tidak valid (HTTP ${response.status}).`
+    );
   }
+
+  if (!response.ok) {
+    throw new Error(
+      data.error || `Permintaan gagal (HTTP ${response.status}).`
+    );
+  }
+
+  return data;
 }
 
 
-/* =====================================================
+/* =========================================================
    NAVIGASI BAWAH
-   ===================================================== */
+   ========================================================= */
 
 function setActiveNavigation(page) {
   document.querySelectorAll('.bottom-nav a').forEach(link => {
@@ -68,7 +120,6 @@ function setActiveNavigation(page) {
   });
 }
 
-
 function navigateTo(page) {
   const destinations = {
     scanner: 'scannerPanel',
@@ -76,11 +127,29 @@ function navigateTo(page) {
     status: 'statusPanel'
   };
 
-  const targetId = destinations[page];
-  const target = targetId ? $(targetId) : null;
+  const target = $(destinations[page]);
 
   if (!target) {
-    console.error('Tujuan navigasi tidak ditemukan:', page);
+    // Fallback untuk HTML versi lama.
+    const fallback = {
+      scanner: document.querySelector('.controls'),
+      analysis: $('analysisPanel'),
+      status: $('providerNote')
+    };
+
+    const fallbackTarget = fallback[page];
+
+    if (!fallbackTarget) {
+      console.warn('Bagian navigasi tidak ditemukan:', page);
+      return;
+    }
+
+    fallbackTarget.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start'
+    });
+
+    setActiveNavigation(page);
     return;
   }
 
@@ -96,25 +165,45 @@ function navigateTo(page) {
   }
 }
 
-
 function setupNavigation() {
-  document.querySelectorAll('.bottom-nav a[data-page]').forEach(link => {
+  document.querySelectorAll('.bottom-nav a').forEach(link => {
     link.addEventListener('click', event => {
-      event.preventDefault();
-
       const page = link.dataset.page;
 
+      if (!page) {
+        // Dukungan untuk HTML lama yang memakai href="#analysisPanel".
+        const href = link.getAttribute('href') || '';
+
+        if (href === '#analysisPanel') {
+          event.preventDefault();
+          navigateTo('analysis');
+        } else if (href === '#providerNote') {
+          event.preventDefault();
+          navigateTo('status');
+        } else if (href === '#top') {
+          event.preventDefault();
+          navigateTo('scanner');
+        }
+
+        return;
+      }
+
+      event.preventDefault();
       navigateTo(page);
 
-      history.replaceState(null, '', `#${link.getAttribute('href').slice(1)}`);
+      try {
+        history.replaceState(null, '', `#${page}`);
+      } catch (_) {
+        // Navigasi tetap berfungsi jika history tidak tersedia.
+      }
     });
   });
 }
 
 
-/* =====================================================
-   STATUS API DAN BACKEND
-   ===================================================== */
+/* =========================================================
+   STATUS BACKEND
+   ========================================================= */
 
 async function checkStatus() {
   const badge = $('apiBadge');
@@ -128,60 +217,64 @@ async function checkStatus() {
   setText('statusConnection', 'Menghubungi backend…');
 
   try {
-    const response = await fetch('/api/status', {
-      cache: 'no-store'
-    });
+    const data = await fetchJSON('/api/status');
 
-    let statusData = {};
-
-    try {
-      statusData = await response.json();
-    } catch (_) {
-      statusData = {};
-    }
-
-    if (!response.ok) {
-      throw new Error(
-        statusData.error || `HTTP ${response.status}`
-      );
-    }
-
-    const keyConfigured = Boolean(statusData.api_key_configured);
+    const configured = Boolean(data.api_key_configured);
 
     if (badge) {
-      badge.textContent = keyConfigured
+      badge.textContent = configured
         ? 'API KEY TERPASANG'
         : 'API KEY BELUM DIATUR';
 
-      badge.style.color = keyConfigured
+      badge.style.color = configured
         ? '#39d7a0'
         : '#ffca73';
     }
 
     setText('backendStatus', 'ONLINE');
-    $('backendStatus').className = 'status-ok';
+    setText('statusApiKey', configured ? 'TERPASANG' : 'BELUM DIATUR');
+
+    const backendStatus = $('backendStatus');
+    const apiStatus = $('statusApiKey');
+
+    if (backendStatus) {
+      backendStatus.className = 'status-ok';
+    }
+
+    if (apiStatus) {
+      apiStatus.className = configured
+        ? 'status-ok'
+        : 'status-warn';
+    }
+
+    const universeCount = Number(data.universe_count);
 
     setText(
-      'statusApiKey',
-      keyConfigured ? 'TERPASANG' : 'BELUM DIATUR'
+      'statusUniverse',
+      Number.isFinite(universeCount)
+        ? universeCount.toLocaleString('id-ID')
+        : 'Belum diketahui'
     );
 
-    $('statusApiKey').className = keyConfigured
-      ? 'status-ok'
-      : 'status-warn';
+    setText(
+      'statusUniverseSource',
+      data.universe_source || 'Sumber belum diketahui'
+    );
 
     setText(
       'statusConnection',
-      keyConfigured
-        ? 'Backend merespons dan variabel API key terdeteksi. Ini belum membuktikan bahwa permintaan data Arjum berhasil.'
-        : 'Backend merespons, tetapi API key belum terdeteksi. Periksa Environment Variables di SnapDeploy.'
+      configured
+        ? 'Backend merespons dan API key terdeteksi. Keberhasilan mengambil data harus dipastikan melalui hasil scan.'
+        : 'Backend merespons, tetapi API key belum terdeteksi.'
     );
 
     setText(
       'providerNote',
-      keyConfigured
-        ? 'Backend merespons. Ketersediaan data harus diverifikasi melalui hasil scan.'
-        : 'API key belum terdeteksi. Periksa konfigurasi backend.'
+      configured
+        ? `Backend online. Universe terdeteksi: ${
+            Number.isFinite(universeCount) ? universeCount : 'belum diketahui'
+          } kode.`
+        : 'API key belum terdeteksi. Periksa Environment Variables SnapDeploy.'
     );
 
   } catch (error) {
@@ -191,183 +284,504 @@ async function checkStatus() {
     }
 
     setText('backendStatus', 'TIDAK TERHUBUNG');
-    $('backendStatus').className = 'status-error';
-
     setText('statusApiKey', 'TIDAK DIKETAHUI');
-    $('statusApiKey').className = 'status-warn';
-
-    setText(
-      'statusConnection',
-      `Pemeriksaan gagal: ${error.message}`
-    );
-
-    setText(
-      'providerNote',
-      `Backend tidak dapat diperiksa: ${error.message}`
-    );
+    setText('statusConnection', error.message);
+    setText('providerNote', `Backend tidak dapat diperiksa: ${error.message}`);
   }
 
   updateLastScanStatus();
 }
 
 
-/* =====================================================
-   RINGKASAN PEMINDAIAN
-   ===================================================== */
+/* =========================================================
+   RINGKASAN STATUS PEMINDAIAN
+   ========================================================= */
 
 function updateLastScanStatus() {
   if (!lastScan) {
     setText('statusTimeframe', 'Belum ada scan');
     setText('statusScanned', '—');
-    setText(
-      'statusScanSummary',
-      'Belum ada pemindaian yang dijalankan pada sesi halaman ini.'
-    );
-
+    setText('statusScanSummary', 'Belum ada pemindaian pada sesi halaman ini.');
+    setText('scanProgress', 'Belum ada pemindaian.');
     return;
   }
 
-  setText(
-    'statusTimeframe',
-    lastScan.timeframe || 'Tidak diketahui'
-  );
+  setText('statusTimeframe', lastScan.timeframe || '—');
 
   setText(
     'statusScanned',
-    String(lastScan.scanned ?? 0)
+    `${lastScan.scanned} / ${lastScan.total}`
   );
-
-  const requested = lastScan.requested ?? '—';
-  const scanned = lastScan.scanned ?? 0;
-  const errors = lastScan.errors_count ?? 0;
 
   setText(
     'statusScanSummary',
-    `Timeframe: ${lastScan.timeframe || '—'}. ` +
-    `Berhasil dihitung: ${scanned} dari ${requested} permintaan. ` +
-    `Saham gagal diproses: ${errors}.`
+    `Timeframe: ${lastScan.timeframe}. Berhasil: ${lastScan.scanned}. ` +
+    `Gagal: ${lastScan.errors}.`
+  );
+
+  setText(
+    'scanProgress',
+    `Selesai memeriksa ${lastScan.processed} dari ${lastScan.total} kode.`
   );
 }
 
 
-/* =====================================================
-   SCAN SAHAM
-   ===================================================== */
+/* =========================================================
+   UI PROGRES BATCH
+   ========================================================= */
 
-async function runScan() {
-  const button = $('scanBtn');
+function ensureProgressUI() {
+  if ($('batchProgress')) return;
 
-  button.disabled = true;
-  button.textContent = 'Memindai…';
+  const controls = $('providerNote');
 
-  $('results').innerHTML = `
-    <tr>
-      <td colspan="5" class="empty">
-        Mengambil data dan menghitung model GPR.
-        Proses awal dapat memerlukan waktu.
-      </td>
-    </tr>
+  if (!controls) return;
+
+  const container = document.createElement('div');
+
+  container.id = 'batchProgress';
+  container.style.cssText = [
+    'margin-top:12px',
+    'padding:12px',
+    'border:1px solid #30415a',
+    'border-radius:12px',
+    'background:rgba(10,20,35,.6)',
+    'color:#cbd5e1',
+    'font-size:14px'
+  ].join(';');
+
+  container.innerHTML = `
+    <div id="batchProgressText">Menunggu pemindaian.</div>
+    <div style="height:7px;margin-top:10px;border-radius:10px;background:#263449;overflow:hidden">
+      <div id="batchProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#49a7ff,#55dfb2);transition:width .2s"></div>
+    </div>
+    <button id="stopScanBtn" type="button"
+      style="display:none;margin-top:10px;padding:9px 13px;border:1px solid #7b3545;border-radius:9px;background:#301c2a;color:#ff9cae">
+      ■ Hentikan pemindaian
+    </button>
   `;
 
-  $('errors').classList.add('hidden');
+  controls.insertAdjacentElement('afterend', container);
 
-  try {
-    const query = new URLSearchParams({
-      timeframe: $('timeframe').value,
-      horizon: $('horizon').value,
-      limit: $('limit').value
+  const stopButton = $('stopScanBtn');
+
+  if (stopButton) {
+    stopButton.addEventListener('click', () => {
+      stopRequested = true;
+      setText(
+        'batchProgressText',
+        'Permintaan berhenti diterima. Menunggu batch yang sedang berjalan selesai…'
+      );
+      stopButton.disabled = true;
+      stopButton.textContent = 'Menghentikan…';
     });
+  }
+}
 
-    const response = await fetch(`/api/scan?${query.toString()}`, {
-      cache: 'no-store'
-    });
+function updateProgress(processed, total, message = '') {
+  ensureProgressUI();
 
-    const data = await response.json();
+  const percentage = total > 0
+    ? Math.min(100, Math.round(processed / total * 100))
+    : 0;
 
-    if (!response.ok) {
-      throw new Error(data.error || 'Permintaan scan gagal.');
+  setText(
+    'batchProgressText',
+    message || `${processed} dari ${total} kode diproses (${percentage}%).`
+  );
+
+  const bar = $('batchProgressBar');
+
+  if (bar) {
+    bar.style.width = `${percentage}%`;
+  }
+
+  setText(
+    'scanProgress',
+    message || `${processed} dari ${total} kode diproses.`
+  );
+}
+
+function setStopButtonVisible(visible) {
+  ensureProgressUI();
+
+  const button = $('stopScanBtn');
+
+  if (button) {
+    button.style.display = visible ? 'inline-block' : 'none';
+    button.disabled = false;
+    button.textContent = '■ Hentikan pemindaian';
+  }
+}
+
+
+/* =========================================================
+   MENENTUKAN JUMLAH SAHAM
+   ========================================================= */
+
+async function getScanPlan() {
+  const selector = $('limit');
+
+  const requestedValue = selector
+    ? selector.value
+    : '50';
+
+  if (requestedValue === 'all') {
+    const universe = await fetchJSON('/api/universe');
+
+    const total = Number(universe.count);
+
+    if (!Number.isFinite(total) || total <= 0) {
+      throw new Error('Daftar saham kosong atau tidak dapat dibaca.');
     }
 
-    scanItems = Array.isArray(data.items)
-      ? data.items
-      : [];
+    return {
+      total,
+      source: universe.source || 'Universe backend',
+      mode: 'all'
+    };
+  }
+
+  const requested = Number(requestedValue);
+
+  if (!Number.isFinite(requested) || requested < 1) {
+    throw new Error('Jumlah saham tidak valid.');
+  }
+
+  return {
+    total: requested,
+    source: 'Jumlah saham pilihan',
+    mode: 'limited'
+  };
+}
+
+
+/* =========================================================
+   PEMINDAIAN BERTAHAP
+   ========================================================= */
+
+async function runScan() {
+  if (scanRunning) {
+    setText(
+      'providerNote',
+      'Pemindaian sedang berjalan. Tunggu hingga selesai atau hentikan dahulu.'
+    );
+    return;
+  }
+
+  const button = $('scanBtn');
+  const timeframeElement = $('timeframe');
+  const horizonElement = $('horizon');
+
+  if (!button || !timeframeElement || !horizonElement) {
+    console.error('Elemen pengaturan scan tidak ditemukan.');
+    return;
+  }
+
+  scanRunning = true;
+  stopRequested = false;
+
+  button.disabled = true;
+  button.textContent = 'Memulai pemindaian…';
+
+  setStopButtonVisible(true);
+  ensureProgressUI();
+
+  setHTML('results', `
+    <tr>
+      <td colspan="5" class="empty">
+        Menyiapkan pemindaian saham…
+      </td>
+    </tr>
+  `);
+
+  hideElement('errors');
+
+  scanItems = [];
+
+  const errors = [];
+  let processed = 0;
+  let successful = 0;
+  let total = 0;
+  let offset = 0;
+
+  const timeframe = timeframeElement.value;
+  const horizon = Number(horizonElement.value) || 10;
+
+  try {
+    const plan = await getScanPlan();
+
+    total = plan.total;
 
     lastScan = {
-      timeframe: data.timeframe || $('timeframe').value,
-      scanned: data.scanned ?? scanItems.length,
-      requested: data.requested ?? $('limit').value,
-      errors_count: data.errors_count ?? 0
+      timeframe,
+      total,
+      processed: 0,
+      scanned: 0,
+      errors: 0
     };
+
+    updateProgress(
+      0,
+      total,
+      `Universe: ${total} kode. Pemindaian maksimal ${BATCH_SIZE} kode per permintaan.`
+    );
+
+    while (offset < total && !stopRequested) {
+      const batchLimit = Math.min(BATCH_SIZE, total - offset);
+
+      button.textContent = `Memindai ${Math.min(offset + batchLimit, total)} / ${total}…`;
+
+      const query = new URLSearchParams({
+        timeframe,
+        horizon: String(horizon),
+        limit: String(batchLimit),
+        offset: String(offset)
+      });
+
+      updateProgress(
+        processed,
+        total,
+        `Batch ${Math.floor(offset / BATCH_SIZE) + 1}: meminta data kode ${offset + 1}–${offset + batchLimit}.`
+      );
+
+      let data;
+
+      try {
+        data = await fetchJSON(`/api/scan?${query.toString()}`);
+      } catch (error) {
+        errors.push({
+          code: `Batch offset ${offset}`,
+          error: error.message
+        });
+
+        /*
+         * Jika endpoint tidak tersedia atau terjadi error server,
+         * hentikan agar tidak mengulang error yang sama untuk ratusan kode.
+         */
+        throw new Error(
+          `Batch pada offset ${offset} gagal: ${error.message}`
+        );
+      }
+
+      const batchItems = Array.isArray(data.items)
+        ? data.items
+        : [];
+
+      const batchErrors = Array.isArray(data.errors)
+        ? data.errors
+        : [];
+
+      scanItems.push(...batchItems);
+      errors.push(...batchErrors);
+
+      successful += batchItems.length;
+
+      const batchProcessed = Number(data.requested);
+
+      /*
+       * Gunakan jumlah yang diminta sebagai dasar progres.
+       * Jika server tidak mengembalikannya, gunakan ukuran batch.
+       */
+      processed += Number.isFinite(batchProcessed) && batchProcessed > 0
+        ? batchProcessed
+        : batchLimit;
+
+      offset += batchLimit;
+
+      lastScan = {
+        timeframe,
+        total,
+        processed,
+        scanned: successful,
+        errors: errors.length
+      };
+
+      updateProgress(
+        processed,
+        total,
+        `Progres ${Math.min(processed, total)} / ${total}. Berhasil dianalisis: ${successful}. Gagal: ${errors.length}.`
+      );
+
+      renderResults(scanItems);
+
+      setText('scanned', successful);
+      setText(
+        'universe',
+        `Sumber: ${data.universe_source || plan.source}`
+      );
+
+      setText(
+        'candidates',
+        scanItems.filter(item => item.signal === 'KANDIDAT').length
+      );
+
+      setText(
+        'bestReturn',
+        scanItems.length
+          ? pct(
+              [...scanItems].sort(
+                (a, b) =>
+                  numberValue(b.gpr_return_pct) -
+                  numberValue(a.gpr_return_pct)
+              )[0].gpr_return_pct
+            )
+          : '—'
+      );
+
+      updateLastScanStatus();
+
+      /*
+       * Beri browser waktu memperbarui tampilan sebelum batch selanjutnya.
+       */
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    /*
+     * Urutkan seluruh hasil gabungan.
+     */
+    scanItems.sort((a, b) => {
+      const scoreDifference =
+        numberValue(b.score) - numberValue(a.score);
+
+      if (scoreDifference !== 0) {
+        return scoreDifference;
+      }
+
+      return (
+        numberValue(b.gpr_return_pct)
+        - numberValue(a.gpr_return_pct)
+      );
+    });
 
     renderResults(scanItems);
 
-    setText('scanned', data.scanned ?? scanItems.length);
+    setText('scanned', successful);
 
     setText(
       'universe',
-      `Sumber: ${data.universe_source || 'Arjum'}`
+      `Sumber: ${plan.source}`
     );
 
     setText(
       'candidates',
-      scanItems.filter(x => x.signal === 'KANDIDAT').length
+      scanItems.filter(item => item.signal === 'KANDIDAT').length
     );
 
     setText(
       'bestReturn',
       scanItems.length
-        ? pct(scanItems[0].gpr_return_pct)
+        ? pct(
+            [...scanItems].sort(
+              (a, b) =>
+                numberValue(b.gpr_return_pct) -
+                numberValue(a.gpr_return_pct)
+            )[0].gpr_return_pct
+          )
         : '—'
     );
 
-    if (data.errors_count) {
-      $('errors').classList.remove('hidden');
+    lastScan = {
+      timeframe,
+      total,
+      processed: Math.min(processed, total),
+      scanned: successful,
+      errors: errors.length
+    };
 
-      const examples = (data.errors || [])
-        .slice(0, 4)
-        .map(x => `${x.code}: ${x.error}`)
-        .join(' · ');
+    if (errors.length) {
+      showElement('errors');
 
-      $('errors').textContent =
-        `${data.errors_count} saham gagal diproses.` +
-        (examples ? ` ${examples}` : '');
+      setText(
+        'errors',
+        `${errors.length} saham atau permintaan gagal. ` +
+        errors.slice(0, 5)
+          .map(error => `${error.code || 'Error'}: ${error.error}`)
+          .join(' · ')
+      );
     }
 
-    setText(
-      'providerNote',
-      `Timeframe diminta: ${data.timeframe || $('timeframe').value}. ` +
-      `${data.scanned ?? scanItems.length} berhasil dihitung dari ` +
-      `${data.requested ?? $('limit').value} permintaan.`
-    );
+    if (stopRequested) {
+      updateProgress(
+        processed,
+        total,
+        `Pemindaian dihentikan. Berhasil: ${successful}; gagal: ${errors.length}.`
+      );
+
+      setText(
+        'providerNote',
+        `Pemindaian dihentikan pengguna. Hasil yang terkumpul: ${successful} saham.`
+      );
+
+    } else {
+      updateProgress(
+        total,
+        total,
+        `Selesai. Universe: ${total}; berhasil dianalisis: ${successful}; gagal: ${errors.length}.`
+      );
+
+      setText(
+        'providerNote',
+        `Pemindaian selesai. Berhasil: ${successful} dari ${total} kode. Gagal: ${errors.length}.`
+      );
+    }
 
     updateLastScanStatus();
 
   } catch (error) {
-    $('results').innerHTML = `
-      <tr>
-        <td colspan="5" class="empty">
-          ${escapeHtml(error.message)}
-        </td>
-      </tr>
-    `;
+    console.error('Scan error:', error);
 
     setText('providerNote', error.message);
 
+    updateProgress(
+      processed,
+      total,
+      `Pemindaian terhenti: ${error.message}`
+    );
+
+    if (!scanItems.length) {
+      setHTML('results', `
+        <tr>
+          <td colspan="5" class="empty">
+            ${escapeHtml(error.message)}
+          </td>
+        </tr>
+      `);
+    } else {
+      renderResults(scanItems);
+    }
+
   } finally {
+    scanRunning = false;
+
     button.disabled = false;
     button.textContent = '▶ Jalankan GPR Scanner';
+
+    setStopButtonVisible(false);
+
+    const stopButton = $('stopScanBtn');
+
+    if (stopButton) {
+      stopButton.disabled = false;
+    }
   }
 }
 
 
-/* =====================================================
+/* =========================================================
    TABEL RANKING
-   ===================================================== */
+   ========================================================= */
 
 function renderResults(items) {
-  const searchTerm = $('search').value
-    .trim()
-    .toLowerCase();
+  const table = $('results');
+
+  if (!table) return;
+
+  const searchElement = $('search');
+
+  const searchTerm = searchElement
+    ? searchElement.value.trim().toLowerCase()
+    : '';
 
   const filtered = items.filter(item =>
     String(item.code || '')
@@ -376,30 +790,28 @@ function renderResults(items) {
   );
 
   if (!filtered.length) {
-    $('results').innerHTML = `
+    setHTML('results', `
       <tr>
         <td colspan="5" class="empty">
-          Tidak ada saham yang cocok atau belum ada data.
+          Tidak ada saham yang cocok atau belum ada hasil.
         </td>
       </tr>
-    `;
-
+    `);
     return;
   }
 
-  $('results').innerHTML = filtered.map(item => {
+  table.innerHTML = filtered.map(item => {
     const code = escapeHtml(item.code || '');
     const signal = escapeHtml(item.signal || '');
     const trend = escapeHtml(item.trend || 'UNKNOWN');
 
-    const returnValue = Number(item.gpr_return_pct);
-    const relativeVolume = Number(item.relative_volume);
-    const score = Number(item.score);
+    const returnValue = numberValue(item.gpr_return_pct, NaN);
+    const relativeVolume = numberValue(item.relative_volume, NaN);
+    const score = numberValue(item.score, NaN);
 
     return `
       <tr data-code="${code}" tabindex="0" role="button"
           aria-label="Analisis saham ${code}">
-
         <td>
           <span class="code">${code}</span>
           <span class="sub">${signal}</span>
@@ -424,31 +836,28 @@ function renderResults(items) {
         <td>
           ${Number.isFinite(score) ? score.toFixed(0) : '—'}
         </td>
-
       </tr>
     `;
   }).join('');
 
-  document.querySelectorAll('#results tr[data-code]').forEach(row => {
-    const openAnalysis = () => {
-      analyze(row.dataset.code);
-    };
+  table.querySelectorAll('tr[data-code]').forEach(row => {
+    const open = () => analyze(row.dataset.code);
 
-    row.addEventListener('click', openAnalysis);
+    row.addEventListener('click', open);
 
     row.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
-        openAnalysis();
+        open();
       }
     });
   });
 }
 
 
-/* =====================================================
-   ANALISIS DAN GRAFIK GPR
-   ===================================================== */
+/* =========================================================
+   ANALISIS SAHAM
+   ========================================================= */
 
 async function analyze(code) {
   selectedCode = code;
@@ -456,81 +865,72 @@ async function analyze(code) {
   navigateTo('analysis');
 
   setText('analysisTitle', `Analisis ${code}`);
-  setText('analysisMeta', 'Menghitung proyeksi…');
+  setText('analysisMeta', 'Menghitung proyeksi GPR…');
 
-  $('projectionRows').innerHTML = `
+  setHTML('projectionRows', `
     <tr>
       <td colspan="5" class="empty">
-        Menghitung proyeksi GPR…
+        Menghitung proyeksi…
       </td>
     </tr>
-  `;
+  `);
+
+  const timeframe = $('timeframe')
+    ? $('timeframe').value
+    : '1d';
+
+  const horizon = $('horizon')
+    ? $('horizon').value
+    : '10';
 
   const query = new URLSearchParams({
-    timeframe: $('timeframe').value,
-    horizon: $('horizon').value
+    timeframe,
+    horizon
   });
 
   try {
-    const response = await fetch(
-      `/api/analyze/${encodeURIComponent(code)}?${query.toString()}`,
-      { cache: 'no-store' }
+    const data = await fetchJSON(
+      `/api/analyze/${encodeURIComponent(code)}?${query.toString()}`
     );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Analisis gagal.');
-    }
 
     const predictions = Array.isArray(data.predictions)
       ? data.predictions
       : [];
 
-    $('analysisMeta').innerHTML = `
+    setHTML('analysisMeta', `
       Harga terakhir: <b>${money(data.price)}</b>
       · Tren: <b>${escapeHtml(data.trend || '—')}</b>
       · Momentum: <b>${escapeHtml(data.momentum || '—')}</b>
       · Rel. volume: <b>${escapeHtml(data.relative_volume ?? '—')}×</b>
       <br>
       Return GPR pada candle ke-${escapeHtml(data.horizon ?? '—')}:
-      <b class="${Number(data.gpr_return_pct) >= 0 ? 'pos' : 'neg'}">
+      <b class="${numberValue(data.gpr_return_pct) >= 0 ? 'pos' : 'neg'}">
         ${pct(data.gpr_return_pct)}
       </b>
       · Data: ${escapeHtml(data.bars ?? '—')} candle
-    `;
+    `);
 
     if (!predictions.length) {
-      $('projectionRows').innerHTML = `
+      setHTML('projectionRows', `
         <tr>
           <td colspan="5" class="empty">
             Data proyeksi tidak tersedia.
           </td>
         </tr>
-      `;
+      `);
     } else {
-      $('projectionRows').innerHTML = predictions.map(prediction => `
+      setHTML('projectionRows', predictions.map(prediction => `
         <tr>
           <td>${escapeHtml(prediction.step)}</td>
           <td>${money(prediction.price)}</td>
-          <td class="${Number(prediction.return_pct) >= 0 ? 'pos' : 'neg'}">
+          <td class="${numberValue(prediction.return_pct) >= 0 ? 'pos' : 'neg'}">
             ${pct(prediction.return_pct)}
           </td>
           <td>${money(prediction.upper)}</td>
           <td>${money(prediction.lower)}</td>
         </tr>
-      `).join('');
+      `).join(''));
     }
-
-    const labels = [
-      'Sekarang',
-      ...predictions.map(prediction => `+${prediction.step}`)
-    ];
-
-    const values = [
-      Number(data.price),
-      ...predictions.map(prediction => Number(prediction.price))
-    ];
 
     const canvas = $('projectionChart');
 
@@ -540,6 +940,18 @@ async function analyze(code) {
     }
 
     if (canvas && window.Chart) {
+      const labels = [
+        'Sekarang',
+        ...predictions.map(prediction => `+${prediction.step}`)
+      ];
+
+      const values = [
+        numberValue(data.price, NaN),
+        ...predictions.map(
+          prediction => numberValue(prediction.price, NaN)
+        )
+      ];
+
       chart = new Chart(canvas, {
         type: 'line',
 
@@ -598,42 +1010,64 @@ async function analyze(code) {
       `Tidak dapat menganalisis ${code}: ${error.message}`
     );
 
-    $('projectionRows').innerHTML = `
+    setHTML('projectionRows', `
       <tr>
         <td colspan="5" class="empty">
           ${escapeHtml(error.message)}
         </td>
       </tr>
-    `;
+    `);
   }
 }
 
 
-/* =====================================================
+/* =========================================================
    EVENT LISTENERS
-   ===================================================== */
+   ========================================================= */
 
-$('scanBtn').addEventListener('click', runScan);
+function setupEventListeners() {
+  const scanButton = $('scanBtn');
+  const refreshButton = $('refreshBtn');
+  const searchInput = $('search');
+  const timeframeInput = $('timeframe');
+  const refreshStatusButton = $('refreshStatusBtn');
 
-$('refreshBtn').addEventListener('click', runScan);
+  if (scanButton) {
+    scanButton.addEventListener('click', runScan);
+  }
 
-$('search').addEventListener('input', () => {
-  renderResults(scanItems);
-});
+  if (refreshButton) {
+    refreshButton.addEventListener('click', runScan);
+  }
 
-$('timeframe').addEventListener('change', () => {
-  setText(
-    'providerNote',
-    'Timeframe berubah. Jalankan scan ulang untuk memuat data timeframe tersebut.'
-  );
-});
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      renderResults(scanItems);
+    });
+  }
 
-$('refreshStatusBtn').addEventListener('click', checkStatus);
+  if (timeframeInput) {
+    timeframeInput.addEventListener('change', () => {
+      setText(
+        'providerNote',
+        'Timeframe berubah. Jalankan scan ulang untuk memuat data baru.'
+      );
+    });
+  }
+
+  if (refreshStatusButton) {
+    refreshStatusButton.addEventListener('click', checkStatus);
+  }
+}
 
 
-/* =====================================================
+/* =========================================================
    MULAI APLIKASI
-   ===================================================== */
+   ========================================================= */
 
-setupNavigation();
-checkStatus();
+document.addEventListener('DOMContentLoaded', () => {
+  ensureProgressUI();
+  setupNavigation();
+  setupEventListeners();
+  checkStatus();
+});
